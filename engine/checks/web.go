@@ -1,7 +1,9 @@
 package checks
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -23,11 +25,10 @@ type Web struct {
 }
 
 type urlData struct {
-	Path        string
-	Status      int    `toml:",omitempty"`
-	Diff        int    `toml:",omitempty"`
-	Regex       string `toml:",omitempty"`
-	CompareFile string `toml:",omitempty"` // TODO implement
+	Path   string
+	Status int    `toml:",omitempty"`
+	Regex  string `toml:",omitempty"`
+	Hash   string `toml:",omitempty"` // TODO implement
 }
 
 func (c Web) Run(teamID uint, teamIdentifier string, roundID uint, resultsChan chan Result) {
@@ -86,10 +87,10 @@ func (c Web) Run(teamID uint, teamIdentifier string, roundID uint, resultsChan c
 		}
 
 		defer func() {
-		if err := resp.Body.Close(); err != nil {
-			slog.Error("failed to close http response body", "error", err)
-		}
-	}()
+			if err := resp.Body.Close(); err != nil {
+				slog.Error("failed to close http response body", "error", err)
+			}
+		}()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			checkResult.Error = "error reading page content"
@@ -118,6 +119,23 @@ func (c Web) Run(teamID uint, teamIdentifier string, roundID uint, resultsChan c
 				response <- checkResult
 				return
 			}
+		}
+
+		if u.Hash != "" {
+			sum := sha256.Sum256(body)
+			calculated := hex.EncodeToString(sum[:])
+
+			if calculated != u.Hash {
+				checkResult.Error = "hash mismatch on page"
+				checkResult.Debug = "got " + calculated + " wanted " + u.Hash + " for url " + u.Path
+				response <- checkResult
+				return
+			}
+
+			checkResult.Status = true
+			checkResult.Debug = "hash matched for " + u.Path
+			response <- checkResult
+			return
 		}
 
 		checkResult.Status = true
@@ -158,8 +176,8 @@ func (c *Web) Verify(box string, ip string, points int, timeout int, slapenalty 
 		c.Scheme = "http"
 	}
 	for _, u := range c.Url {
-		if u.Diff != 0 && u.CompareFile == "" {
-			return errors.New("need compare file for diff in web")
+		if u.Regex != "" && u.Hash != "" {
+			return errors.New("Cannot have both regex and hash check")
 		}
 		if u.Path == "" {
 			u.Path = "/"
