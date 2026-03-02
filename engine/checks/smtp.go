@@ -3,6 +3,7 @@ package checks
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -38,6 +39,32 @@ func (a unencryptedAuth) Start(server *smtp.ServerInfo) (string, []byte, error) 
 	return a.Auth.Start(&s)
 }
 
+type loginAuth struct {
+	username, password string
+}
+
+func LoginAuth(username, password string) smtp.Auth {
+	return &loginAuth{username, password}
+}
+
+func (a *loginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	return "LOGIN", []byte{}, nil
+}
+
+func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
+	if more {
+		switch string(fromServer) {
+		case "Username:":
+			return []byte(a.username), nil
+		case "Password:":
+			return []byte(a.password), nil
+		default:
+			return nil, errors.New("Unkown fromServer")
+		}
+	}
+	return nil, nil
+}
+
 func (c Smtp) Run(teamID uint, teamIdentifier string, roundID uint, resultsChan chan Result) {
 	definition := func(teamID uint, teamIdentifier string, checkResult Result, response chan Result) {
 		// Create a dialer
@@ -65,7 +92,6 @@ func (c Smtp) Run(teamID uint, teamIdentifier string, roundID uint, resultsChan 
 			return
 		}
 
-		auth := unencryptedAuth{smtp.PlainAuth("", username+c.Domain, password, c.Target)}
 		// ***********************************************
 
 		if c.Domain != "" {
@@ -95,10 +121,18 @@ func (c Smtp) Run(teamID uint, teamIdentifier string, roundID uint, resultsChan 
 			return
 		}
 		defer func() {
-		if err := conn.Close(); err != nil {
-			slog.Error("failed to close smtp connection", "error", err)
+			if err := conn.Close(); err != nil {
+				slog.Error("failed to close smtp connection", "error", err)
+			}
+		}()
+
+		err = conn.SetDeadline(time.Now().Add(time.Duration(c.Timeout) * time.Second))
+		if err != nil {
+			checkResult.Error = "failed to set connection deadline"
+			checkResult.Debug = err.Error()
+			response <- checkResult
+			return
 		}
-	}()
 
 		// Create smtp client
 		sconn, err := smtp.NewClient(conn, c.Target)
@@ -114,7 +148,7 @@ func (c Smtp) Run(teamID uint, teamIdentifier string, roundID uint, resultsChan 
 		if len(c.CredLists) > 0 {
 			authSupported, _ := sconn.Extension("AUTH")
 			if c.RequireAuth || authSupported {
-				err = sconn.Auth(auth)
+				err = sconn.Auth(LoginAuth(username, password))
 				if err != nil {
 					checkResult.Error = "login failed for " + username + ":" + password
 					checkResult.Debug = err.Error()
